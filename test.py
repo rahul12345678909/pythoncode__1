@@ -1,13 +1,34 @@
 #!/usr/bin/python3
 
-import subprocess
+import pexpect
+import re
 import os
 import time
 import xml.etree.ElementTree as ET
 
+
+def create_unique_run_type(run_type):
+    """
+    Create a new unique run type using current timestamp.
+
+    :param run_type: Run type
+    :return: str
+    """
+    from time import localtime, strftime
+    current_time = strftime("%H_%M_%S", localtime())
+    get_current_date = strftime("%d_%m_%Y", localtime())
+    date_and_time = get_current_date + '_' + current_time
+    pid = str(os.getpid())
+    run_type_stamp = os.path.normpath(date_and_time + '_' + pid + '_' + run_type)
+    return run_type_stamp
+
+
 def transform_result_name(result_name):
+    # Remove any slashes from the result name
     transformed_name = result_name.replace('/', '')
-    return transformed_name
+    unique_transformed_name = create_unique_run_type(transformed_name)
+    return unique_transformed_name.replace('_', '-')
+
 
 def extract_results(xml_path, txt_path):
     if not os.path.isfile(xml_path):
@@ -29,76 +50,80 @@ def extract_results(xml_path, txt_path):
                 file.write(f"Value: {value}\n")
                 file.write('-' * 40 + '\n')
         print(f"Results saved to {txt_path}")
-
     except ET.ParseError as e:
         print(f"Error parsing XML: {e}")
+
+
+def create_unique_run_type(run_type):
+    """
+    Create a new unique run type using current timestamp.
+
+    :param run_type: Run type
+    :return: str
+    """
+    from time import localtime, strftime
+    current_time = strftime("%H_%M_%S", localtime())
+    get_current_date = strftime("%d_%m_%Y", localtime())
+    date_and_time = get_current_date + '_' + current_time
+    pid = str(os.getpid())
+    run_type_stamp = os.path.normpath(date_and_time + '_' + pid + '_' + run_type)
+    return run_type_stamp
+
+
 
 def run_phoronix_test(test_name):
     kernel_version = os.uname().release
     result_name = f"{test_name}"
     transformed_result_name = transform_result_name(result_name)
-
     print(f"transformed_result_name: {transformed_result_name}")
-
     result_xml_path = f"/home/amd/.phoronix-test-suite/test-results/{transformed_result_name}/composite.xml"
-    result_txt_path = f"/tests/jenkins/pts/workspace/guest_regression/{transformed_result_name}/extracted_result.txt"
-
+    result_txt_path = f"/home/amd/.phoronix-test-suite/test-results/{transformed_result_name}/{transformed_result_name}_result.txt"
     start_time = time.time()
     print(f"Test started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
 
-    # Prepare responses to be passed to PTS
-    responses = [
-        "4",  # Processor Test Configuration: 7 (Test All Options)
-        "Y",  # Would you like to save these test results? (Y/n): Y
-        transformed_result_name,  # Enter a name for the result file
-        f"Test run for {test_name} on kernel {kernel_version}",  # Enter a unique name to describe this test run / configuration
-        "Automated test run for pts/nginx on this system.",  # New Description
-        "n",  # Would you like to view the results in your web browser (Y/n): n
-        "n"   # Would you like to upload the results to OpenBenchmarking.org (y/n): n
-    ]
-
-    process = subprocess.Popen(
-        ['phoronix-test-suite', 'benchmark', test_name],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True
-    )
+    # Start the Phoronix Test Suite process
+    child = pexpect.spawn('phoronix-test-suite benchmark pts/nginx', timeout=540)
+    unique_log = create_unique_run_type("Ngx7_output.log")
+    child.logfile = open(unique_log, "wb")
 
     try:
-        for response in responses:
-            print(f"Sending response: {response}")
-            process.stdin.write(response + '\n')
-            process.stdin.flush()
-            time.sleep(5)  # Adjust as necessary to match the prompts timing
+        unique_test_name = create_unique_run_type(test_name)
+        # List of prompts and responses
+        prompts_and_responses = [
+            (r"System Test Configuration", None),
+            (r"Connections:.*", "2"),
+            (r"Would you like to save these test results \(Y/n\):".encode(), "y"),
+            (r"Enter a name for the result file:".encode(), transformed_result_name),
+            (r"Enter a unique name to describe this test run / configuration:".encode(), f"Test run for {unique_test_name} on kernel {kernel_version}"),
+            (r"New Description:".encode(), "Automated test run for pts/nginx on this system."),
+            (re.compile(r"Do you want to view the results in your web browser \(Y/n\)\:".encode()), "n"),
+            (re.compile(r"Would you like to upload the results to OpenBenchmarking\.org \(y/n\)\:".encode()), "n")
+        ]
 
-        stdout, stderr = process.communicate(timeout=2400)  # Wait up to 10 minutes for completion
+        # Loop through the prompts and send the corresponding responses
+        for prompt, response in prompts_and_responses:
+            child.expect(prompt)
+            if response is not None:
+                child.sendline(response)
 
-        # print(f"stdout:\n{stdout}")
-        # print(f"stderr:\n{stderr}")
+        # Ensuring the test completes and the results file is generated
+        child.expect(pexpect.EOF)
 
-    except subprocess.TimeoutExpired:
-        print("Phoronix Test Suite process took too long to complete and was terminated.")
-        process.kill()
-        stdout, stderr = process.communicate()
-        print(f"stdout:\n{stdout}")
-        print(f"stderr:\n{stderr}")
+        # Checking if the results file exists
+        if not os.path.exists(result_xml_path):
+            print(f"File {result_xml_path} does not exist.")
+        else:
+            print(f"File {result_xml_path} exists.")
+            extract_results(result_xml_path, result_txt_path)
 
-    except Exception as e:
+    except pexpect.TIMEOUT:
+        print("Timeout error: Timeout exceeded.")
+    except pexpect.ExceptionPexpect as e:
         print(f"An error occurred: {e}")
-        process.kill()
-        stdout, stderr = process.communicate()
-        print(f"stdout:\n{stdout}")
-        print(f"stderr:\n{stderr}")
-
     finally:
+        child.logfile.close()
         end_time = time.time()
-        print(f"Test completed at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
-        print(f"Duration: {end_time - start_time:.2f} seconds")
-
-        # Extract results and save to a text file
-        extract_results(result_xml_path, result_txt_path)
+        print(f"Test ended at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
 
 if __name__ == "__main__":
-    test_name = "pts/nginx"
-    run_phoronix_test(test_name)
+    run_phoronix_test("pts/nginx")
