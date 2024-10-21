@@ -54,21 +54,6 @@ def extract_results(xml_path, txt_path):
         print(f"Error parsing XML: {e}")
 
 
-def create_unique_run_type(run_type):
-    """
-    Create a new unique run type using current timestamp.
-
-    :param run_type: Run type
-    :return: str
-    """
-    from time import localtime, strftime
-    current_time = strftime("%H_%M_%S", localtime())
-    get_current_date = strftime("%d_%m_%Y", localtime())
-    date_and_time = get_current_date + '_' + current_time
-    pid = str(os.getpid())
-    run_type_stamp = os.path.normpath(date_and_time + '_' + pid + '_' + run_type)
-    return run_type_stamp
-
 
 
 def run_phoronix_test(test_name):
